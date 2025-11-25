@@ -3,15 +3,20 @@
 #include <math.h>
 #include <string.h>
 #include <time.h>
+#include <stdint.h> 
 
-
-//    ABLATION CONFIGURATION
-//    1 = Use RISC-V Vector (RVV) Implementation
-//    0 = Use Scalar Baseline Implementation
-
+// --- ABLATION CONFIGURATION ---
+#ifndef ENABLE_RVV_MATMUL
 #define ENABLE_RVV_MATMUL     0 
+#endif
+
+#ifndef ENABLE_RVV_LAYERNORM 
 #define ENABLE_RVV_LAYERNORM  0 
+#endif
+
+#ifndef ENABLE_RVV_ADD
 #define ENABLE_RVV_ADD        0
+#endif
 
 #if (ENABLE_RVV_MATMUL || ENABLE_RVV_LAYERNORM || ENABLE_RVV_ADD )
     #include <riscv_vector.h>
@@ -29,6 +34,20 @@
 #define SQRT_2_PI 0.7978845608f
 #define C_GELU 0.044715f
 
+// --- METRIC HELPERS ---
+static inline uint64_t rdcycle() {
+    uint64_t val;
+    __asm__ volatile ("csrr %0, cycle" : "=r"(val));
+    return val;
+}
+
+static inline uint64_t rdinstret() {
+    uint64_t val;
+    __asm__ volatile ("csrr %0, instret" : "=r"(val));
+    return val;
+}
+
+// Global Structures
 typedef struct {
     float *wte; // [VOCAB, D_MODEL]
     float *wpe; // [MAX_SEQ, D_MODEL]
@@ -43,12 +62,12 @@ typedef struct {
 } GPT2Weights;
 
 typedef struct {
-    float *key_cache;   // [Layers * Heads * Seq * HeadSize]
-    float *value_cache; // [Layers * Heads * Seq * HeadSize]
+    float *key_cache;   
+    float *value_cache; 
 } GPT2State;
 
 
-// SCALAR KERNELS (BASELINE)
+// --- SCALAR KERNELS ---
 void add_scalar(float *out, float *a, float *b, int size) {
     for(int i=0; i<size; i++) out[i] = a[i] + b[i];
 }
@@ -66,31 +85,24 @@ void layernorm_scalar(float *out, float *x, float *g, float *b, int size) {
     float mean = 0.0f;
     for(int i=0; i<size; i++) mean += x[i];
     mean /= size;
-    
     float var = 0.0f;
     for(int i=0; i<size; i++) var += (x[i] - mean) * (x[i] - mean);
     var /= size;
-    
     float inv_std = 1.0f / sqrtf(var + EPS);
-    for(int i=0; i<size; i++) {
-        out[i] = (x[i] - mean) * inv_std * g[i] + b[i];
-    }
+    for(int i=0; i<size; i++) out[i] = (x[i] - mean) * inv_std * g[i] + b[i];
 }
 
 void matmul_scalar(float *out, float *x, float *w, float *b, int dim_in, int dim_out) {
     for (int i = 0; i < dim_out; i++) {
         float val = (b != NULL) ? b[i] : 0.0f;
-        for (int j = 0; j < dim_in; j++) {
-            val += x[j] * w[j * dim_out + i];
-        }
+        for (int j = 0; j < dim_in; j++) val += x[j] * w[j * dim_out + i];
         out[i] = val;
     }
 }
 
 
-// RISC-V VECTOR KERNELS
+// --- RVV KERNELS ---
 #ifdef HAS_RVV_HEADER
-
 void add_rvv(float *out, float *a, float *b, int size) {
     size_t vl;
     for (int i = 0; i < size; i += vl) {
@@ -104,7 +116,6 @@ void add_rvv(float *out, float *a, float *b, int size) {
 
 void layernorm_rvv(float *out, float *x, float *g, float *b, int size) {
     size_t vl;
-    // Mean
     vfloat32m1_t v_sum = __riscv_vfmv_v_f_f32m1(0.0f, 1);
     int ptr = 0;
     while(ptr < size) {
@@ -115,7 +126,6 @@ void layernorm_rvv(float *out, float *x, float *g, float *b, int size) {
     }
     float mean = __riscv_vfmv_f_s_f32m1_f32(v_sum) / size;
 
-    // Variance
     vfloat32m1_t v_var = __riscv_vfmv_v_f_f32m1(0.0f, 1);
     ptr = 0;
     while(ptr < size) {
@@ -129,7 +139,6 @@ void layernorm_rvv(float *out, float *x, float *g, float *b, int size) {
     float var = __riscv_vfmv_f_s_f32m1_f32(v_var) / size;
     float inv_std = 1.0f / sqrtf(var + EPS);
 
-    // Normalize
     ptr = 0;
     while(ptr < size) {
         vl = __riscv_vsetvl_e32m8(size - ptr);
@@ -165,7 +174,7 @@ void matmul_rvv(float *out, float *x, float *w, float *b, int dim_in, int dim_ou
 #endif
 
 
-// Mapping
+// --- KERNEL MAPPING ---
 #if ENABLE_RVV_MATMUL
     #define MATMUL matmul_rvv
     const char* MODE_MATMUL = "RVV";
@@ -193,6 +202,7 @@ void matmul_rvv(float *out, float *x, float *w, float *b, int dim_in, int dim_ou
 #endif
 
 
+// --- MODEL LAYERS ---
 void softmax(float *x, int n) {
     float max_val = x[0];
     for (int i = 1; i < n; i++) if (x[i] > max_val) max_val = x[i];
@@ -209,121 +219,72 @@ void attention(float *out, float *x,
                float *c_proj_w, float *c_proj_b,
                GPT2State *state, int layer, int pos) {
     
-    // 1. QKV Projection (Mapped)
+    // QKV
     float qkv[3 * D_MODEL]; 
     MATMUL(qkv, x, c_attn_w, c_attn_b, D_MODEL, 3 * D_MODEL);
-
-    float *q = qkv;
-    float *k = qkv + D_MODEL;
-    float *v = qkv + 2 * D_MODEL;
-
+    float *q = qkv, *k = qkv + D_MODEL, *v = qkv + 2 * D_MODEL;
     float att_out[D_MODEL];
 
-    // 2. Multi-Head Attention Loop
+    // Multi-Head
     for (int h = 0; h < N_HEADS; h++) {
         float *head_q = q + h * HEAD_SIZE;
+        int cache_offset = layer * (N_HEADS * MAX_SEQ_LEN * HEAD_SIZE) + h * (MAX_SEQ_LEN * HEAD_SIZE) + pos * HEAD_SIZE;
         
-        int cache_offset = layer * (N_HEADS * MAX_SEQ_LEN * HEAD_SIZE) + 
-                           h * (MAX_SEQ_LEN * HEAD_SIZE) + 
-                           pos * HEAD_SIZE;
-        
-        float *cache_k = state->key_cache + cache_offset;
-        float *cache_v = state->value_cache + cache_offset;
-
-        memcpy(cache_k, k + h * HEAD_SIZE, HEAD_SIZE * sizeof(float));
-        memcpy(cache_v, v + h * HEAD_SIZE, HEAD_SIZE * sizeof(float));
+        memcpy(state->key_cache + cache_offset, k + h * HEAD_SIZE, HEAD_SIZE * sizeof(float));
+        memcpy(state->value_cache + cache_offset, v + h * HEAD_SIZE, HEAD_SIZE * sizeof(float));
 
         float scores[MAX_SEQ_LEN]; 
-        
-        // --- SCORE CALCULATION ---
-        // For strict ablation, we could vectorize this Dot Product too.
-        // For this demo, we keep it manual/scalar loop to focus on the big kernels.
         for (int t = 0; t <= pos; t++) {
-            int past_offset = layer * (N_HEADS * MAX_SEQ_LEN * HEAD_SIZE) + 
-                              h * (MAX_SEQ_LEN * HEAD_SIZE) + 
-                              t * HEAD_SIZE;
+            int past_offset = layer * (N_HEADS * MAX_SEQ_LEN * HEAD_SIZE) + h * (MAX_SEQ_LEN * HEAD_SIZE) + t * HEAD_SIZE;
             float *past_k = state->key_cache + past_offset;
-
             float score = 0.0f;
             for (int i = 0; i < HEAD_SIZE; i++) score += head_q[i] * past_k[i];
-            score /= sqrtf((float)HEAD_SIZE);
-            scores[t] = score;
+            scores[t] = score / sqrtf((float)HEAD_SIZE);
         }
-
         softmax(scores, pos + 1);
 
-        // --- WEIGHTED SUM ---
         float *head_out = att_out + h * HEAD_SIZE;
         for (int i = 0; i < HEAD_SIZE; i++) head_out[i] = 0.0f;
-
         for (int t = 0; t <= pos; t++) {
-            int past_offset = layer * (N_HEADS * MAX_SEQ_LEN * HEAD_SIZE) + 
-                              h * (MAX_SEQ_LEN * HEAD_SIZE) + 
-                              t * HEAD_SIZE;
+            int past_offset = layer * (N_HEADS * MAX_SEQ_LEN * HEAD_SIZE) + h * (MAX_SEQ_LEN * HEAD_SIZE) + t * HEAD_SIZE;
             float *past_v = state->value_cache + past_offset;
-            float prob = scores[t];
-            for (int i = 0; i < HEAD_SIZE; i++) head_out[i] += prob * past_v[i];
+            for (int i = 0; i < HEAD_SIZE; i++) head_out[i] += scores[t] * past_v[i];
         }
     }
-
-    // 3. Output Projection (Mapped)
     MATMUL(out, att_out, c_proj_w, c_proj_b, D_MODEL, D_MODEL);
 }
 
 void transformer_block(float *x, GPT2Weights *w, GPT2State *s, int layer, int pos) {
     float resid[D_MODEL];
     memcpy(resid, x, D_MODEL * sizeof(float));
-
-    // LN 1
     float ln1[D_MODEL];
     LAYERNORM(ln1, x, w->ln1_w[layer], w->ln1_b[layer], D_MODEL);
-
-    // Attention
-    float attn_out[D_MODEL];
-    attention(attn_out, ln1, w->attn_w[layer], w->attn_b[layer], 
-              w->attn_proj_w[layer], w->attn_proj_b[layer], s, layer, pos);
     
-    // Resid 1
+    float attn_out[D_MODEL];
+    attention(attn_out, ln1, w->attn_w[layer], w->attn_b[layer], w->attn_proj_w[layer], w->attn_proj_b[layer], s, layer, pos);
     ADD(x, resid, attn_out, D_MODEL);
     memcpy(resid, x, D_MODEL * sizeof(float));
-
-    // LN 2
+    
     float ln2[D_MODEL];
     LAYERNORM(ln2, x, w->ln2_w[layer], w->ln2_b[layer], D_MODEL);
-
-    // MLP FC
     float mlp_hidden[4 * D_MODEL];
     MATMUL(mlp_hidden, ln2, w->mlp_fc_w[layer], w->mlp_fc_b[layer], D_MODEL, 4 * D_MODEL);
-    
-    // GELU
     GELU(mlp_hidden, 4 * D_MODEL);
-    
-    // MLP Proj
     float mlp_out[D_MODEL];
     MATMUL(mlp_out, mlp_hidden, w->mlp_proj_w[layer], w->mlp_proj_b[layer], 4 * D_MODEL, D_MODEL);
-
-    // Resid 2
     ADD(x, resid, mlp_out, D_MODEL);
 }
 
-int main() {
-    printf("ABLATIONS:\n");
-    printf("MatMul:    %s\n", MODE_MATMUL);
-    printf("LayerNorm: %s\n", MODE_LN);
-    printf("Add:       %s\n", MODE_ADD);
+int main(int argc, char **argv) {
+    if(argc != 3) { fprintf(stderr, "Usage Error\n"); return 1; }
+
+    fprintf(stderr, "ABLATIONS: MatMul=%s, LN=%s, Add=%s\n", MODE_MATMUL, MODE_LN, MODE_ADD);
     
     FILE *f = fopen("gpt2_weights.bin", "rb");
-    if (!f) { printf("Error: gpt2_weights.bin not found\n"); return 1; }
-    fseek(f, 0, SEEK_END);
-    long filesize = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (!f) return 1;
+    fseek(f, 0, SEEK_END); long filesize = ftell(f); fseek(f, 0, SEEK_SET);
     float *memory = (float*)malloc(filesize);
-    if(!memory) { printf("Malloc failed\n"); return 1; }
-    
-    if (fread(memory, 1, filesize, f) != filesize) {
-        printf("Error reading weights\n");
-        free(memory); fclose(f); return 1;
-    }
+    if(fread(memory, 1, filesize, f) != filesize) { free(memory); fclose(f); return 1; }
     fclose(f);
 
     GPT2Weights w;
@@ -331,89 +292,86 @@ int main() {
     w.wte = ptr; ptr += VOCAB_SIZE * D_MODEL;
     w.wpe = ptr; ptr += MAX_SEQ_LEN * D_MODEL;
     for (int i = 0; i < N_LAYERS; i++) {
-        w.ln1_w[i] = ptr; ptr += D_MODEL;
-        w.ln1_b[i] = ptr; ptr += D_MODEL;
-        w.attn_w[i] = ptr; ptr += D_MODEL * 3 * D_MODEL;
-        w.attn_b[i] = ptr; ptr += 3 * D_MODEL;
-        w.attn_proj_w[i] = ptr; ptr += D_MODEL * D_MODEL;
-        w.attn_proj_b[i] = ptr; ptr += D_MODEL;
-        w.ln2_w[i] = ptr; ptr += D_MODEL;
-        w.ln2_b[i] = ptr; ptr += D_MODEL;
-        w.mlp_fc_w[i] = ptr; ptr += D_MODEL * 4 * D_MODEL;
-        w.mlp_fc_b[i] = ptr; ptr += 4 * D_MODEL;
-        w.mlp_proj_w[i] = ptr; ptr += 4 * D_MODEL * D_MODEL;
-        w.mlp_proj_b[i] = ptr; ptr += D_MODEL;
+        w.ln1_w[i] = ptr; ptr += D_MODEL; w.ln1_b[i] = ptr; ptr += D_MODEL;
+        w.attn_w[i] = ptr; ptr += D_MODEL*3*D_MODEL; w.attn_b[i] = ptr; ptr += 3*D_MODEL;
+        w.attn_proj_w[i] = ptr; ptr += D_MODEL*D_MODEL; w.attn_proj_b[i] = ptr; ptr += D_MODEL;
+        w.ln2_w[i] = ptr; ptr += D_MODEL; w.ln2_b[i] = ptr; ptr += D_MODEL;
+        w.mlp_fc_w[i] = ptr; ptr += D_MODEL*4*D_MODEL; w.mlp_fc_b[i] = ptr; ptr += 4*D_MODEL;
+        w.mlp_proj_w[i] = ptr; ptr += 4*D_MODEL*D_MODEL; w.mlp_proj_b[i] = ptr; ptr += D_MODEL;
     }
-    w.ln_f_w = ptr; ptr += D_MODEL;
-    w.ln_f_b = ptr; ptr += D_MODEL;
-    w.lm_head = ptr;
+    w.ln_f_w = ptr; ptr += D_MODEL; w.ln_f_b = ptr; ptr += D_MODEL; w.lm_head = ptr;
 
     GPT2State state;
     long cache_size = (long)N_LAYERS * MAX_SEQ_LEN * D_MODEL; 
     state.key_cache = (float*)malloc(cache_size * sizeof(float));
     state.value_cache = (float*)malloc(cache_size * sizeof(float));
 
-    // Prompt: "The quick brown fox jumps over the lazy"
-    int prompt_tokens[] = { 464, 2068, 7586, 21831, 18045, 625, 262, 16931 };
-    int num_prompt = sizeof(prompt_tokens) / sizeof(int);
-    int tokens_to_generate = 10; 
-
-    printf("Prompt Length: %d. Generating %d tokens.\n", num_prompt, tokens_to_generate);
-
+    int tokens_to_generate = atoi(argv[1]);
+    int num_prompt = 1;
+    for(char *p = argv[2]; *p; p++) if(*p == ',') num_prompt++;
+    int *prompt_tokens = (int*)malloc(num_prompt * sizeof(int));
+    char *token_str = strtok(argv[2], ",");
+    int idx = 0;
+    while(token_str) { prompt_tokens[idx++] = atoi(token_str); token_str = strtok(NULL, ","); }
+    
+    int *generated_tokens = (int*)malloc(tokens_to_generate * sizeof(int));
+    int gen_idx = 0;
     int current_token = prompt_tokens[0];
     int pos = 0;
     float x[D_MODEL];
     float *logits = (float*)malloc(VOCAB_SIZE * sizeof(float));
-    
-    clock_t start = clock();
+
+    // --- METRICS START ---
+    clock_t start_clock = clock();
+    uint64_t start_cycles = rdcycle();
+    uint64_t start_instret = rdinstret();
+    double ttft_ms = 0.0; 
 
     while (pos < num_prompt + tokens_to_generate) {
-        // Embedding
-        for(int i=0; i<D_MODEL; i++) {
-            x[i] = w.wte[current_token * D_MODEL + i] + w.wpe[pos * D_MODEL + i];
-        }
-
-        // Forward
-        for(int i=0; i<N_LAYERS; i++) {
-            transformer_block(x, &w, &state, i, pos);
-        }
-
-        // Final Norm
+        for(int i=0; i<D_MODEL; i++) x[i] = w.wte[current_token * D_MODEL + i] + w.wpe[pos * D_MODEL + i];
+        for(int i=0; i<N_LAYERS; i++) transformer_block(x, &w, &state, i, pos);
+        
         float final_norm[D_MODEL];
         LAYERNORM(final_norm, x, w.ln_f_w, w.ln_f_b, D_MODEL);
 
-        // Next Token Logic
         int next_token;
         if (pos < num_prompt - 1) {
             next_token = prompt_tokens[pos + 1];
         } else {
-            // Logits
             MATMUL(logits, final_norm, w.lm_head, NULL, D_MODEL, VOCAB_SIZE);
-            
             float max_prob = -1e9;
             int argmax = 0;
-            for(int i=0; i<VOCAB_SIZE; i++) {
-                if (logits[i] > max_prob) {
-                    max_prob = logits[i];
-                    argmax = i;
+            for(int i=0; i<VOCAB_SIZE; i++) { if (logits[i] > max_prob) { max_prob = logits[i]; argmax = i; } }
+            next_token = argmax;
+            
+            if (gen_idx < tokens_to_generate) {
+                generated_tokens[gen_idx++] = next_token;
+                // CAPTURE TTFT: Time when first NEW token is fully generated
+                if (gen_idx == 1) {
+                    ttft_ms = (double)(clock() - start_clock) * 1000.0 / CLOCKS_PER_SEC;
                 }
             }
-            next_token = argmax;
-            printf("Step %d | Token: %d\n", pos, next_token);
         }
-
-        pos++;
-        current_token = next_token;
+        pos++; current_token = next_token;
         if (pos >= MAX_SEQ_LEN) break;
     }
     
-    clock_t end = clock();
-    double time_spent = (double)(end - start) / CLOCKS_PER_SEC;
-    printf("Inference finished in %f seconds.\n", time_spent);
+    // --- METRICS END ---
+    uint64_t end_instret = rdinstret();
+    uint64_t end_cycles = rdcycle();
+    double total_ms = (double)(clock() - start_clock) * 1000.0 / CLOCKS_PER_SEC;
 
-    free(memory);
-    free(state.key_cache);
-    free(state.value_cache);
-    free(logits);
+    // OUTPUT: Wallclock, TTFT, Instructions, Cycles, Mem(Placeholder), Tokens
+    printf("%f\n", total_ms);
+    printf("%f\n", ttft_ms); 
+    printf("%lu\n", end_instret - start_instret);
+    printf("%lu\n", end_cycles - start_cycles);
+    printf("0\n"); 
+    
+    for(int i=0; i<gen_idx; i++) printf("%d%s", generated_tokens[i], (i == gen_idx - 1) ? "" : ",");
+    printf("\n");
+
+    free(prompt_tokens); free(generated_tokens); free(memory);
+    free(state.key_cache); free(state.value_cache); free(logits);
     return 0;
 }

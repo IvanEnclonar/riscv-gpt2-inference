@@ -1,0 +1,77 @@
+Ablation Report
+Prompt: The quick brown fox 
+Generating: 10
+============================================================
+
+--- Scalar Baseline ---
+Settings: MatMul=Scalar, LN=Scalar, Add=Scalar
+Total Cycles:         68,129,013,816
+Instructions:         68,128,991,216
+TTFT (Latency):       7755.6600 ms
+Time/Token (Decode):  2058.7149 ms/token
+Total Wallclock:      26284.0940 ms
+Output:               " is a very good choice for a dog that"
+
+--- RVV MatMul Only ---
+Settings: MatMul=RVV, LN=Scalar, Add=Scalar
+Total Cycles:         56,603,122,987
+Instructions:         56,603,102,043
+TTFT (Latency):       6072.6110 ms
+Time/Token (Decode):  1751.6421 ms/token
+Total Wallclock:      21837.3900 ms
+Output:               " is a very good choice for a dog that"
+
+--- RVV LayerNorm Only ---
+Settings: MatMul=Scalar, LN=RVV, Add=Scalar
+Total Cycles:         67,005,597,971
+Instructions:         67,005,577,259
+TTFT (Latency):       7466.1830 ms
+Time/Token (Decode):  2042.7369 ms/token
+Total Wallclock:      25850.8150 ms
+Output:               " is a very good choice for a dog that"
+
+--- RVV MatMul + LN ---
+Settings: MatMul=RVV, LN=RVV, Add=Scalar
+Total Cycles:         59,471,331,631
+Instructions:         59,471,310,879
+TTFT (Latency):       6222.8880 ms
+Time/Token (Decode):  1857.9139 ms/token
+Total Wallclock:      22944.1130 ms
+Output:               " is a very good choice for a dog that"
+
+--- RVV Add Only ---
+Settings: MatMul=Scalar, LN=Scalar, Add=RVV
+Total Cycles:         70,663,464,364
+Instructions:         70,663,433,790
+TTFT (Latency):       8065.7010 ms
+Time/Token (Decode):  2132.8502 ms/token
+Total Wallclock:      27261.3530 ms
+Output:               " is a very good choice for a dog that"
+
+--- RVV MatMul + Add ---
+Settings: MatMul=RVV, LN=Scalar, Add=RVV
+Total Cycles:         60,361,047,053
+Instructions:         60,361,026,101
+TTFT (Latency):       6781.7800 ms
+Time/Token (Decode):  1833.9506 ms/token
+Total Wallclock:      23287.3350 ms
+Output:               " is a very good choice for a dog that"
+
+--- RVV LN + Add ---
+Settings: MatMul=Scalar, LN=RVV, Add=RVV
+Total Cycles:         69,748,905,984
+Instructions:         69,748,884,058
+TTFT (Latency):       7654.7070 ms
+Time/Token (Decode):  2139.3846 ms/token
+Total Wallclock:      26909.1680 ms
+Output:               " is a very good choice for a dog that"
+
+--- Fully Vectorized (RVV All) ---
+Settings: MatMul=RVV, LN=RVV, Add=RVV
+Total Cycles:         60,870,428,778
+Instructions:         60,870,407,376
+TTFT (Latency):       6528.4570 ms
+Time/Token (Decode):  1883.9163 ms/token
+Total Wallclock:      23483.7040 ms
+Output:               " is a very good choice for a dog that"
+
