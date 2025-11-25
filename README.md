@@ -13,4 +13,5 @@ This is a minimal, self-contained implementation of GPT-2 inference on RISC-V, d
 ## Run
 ```qemu-riscv64 ./gpt2_rvv```
 
-Built in collaboration with [BorisVictoria](https://github.com/BorisVictoria) and [Joel Ethan Batac](https://github.com/marcusaurelys)
+---
+<sub>Built in collaboration with [BorisVictoria](https://github.com/BorisVictoria) and [Joel Ethan Batac](https://github.com/marcusaurelys)</sub>
