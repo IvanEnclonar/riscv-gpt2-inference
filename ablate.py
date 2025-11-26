@@ -97,9 +97,9 @@ def main():
                     f"Add={'RVV' if config['add'] else 'Scalar'}\n")
             f.write(f"Total Cycles:         {cycles:,}\n")
             f.write(f"Instructions:         {instructions:,}\n")
-            f.write(f"TTFT (Latency):       {ttft_ms:.4f} ms\n")
-            f.write(f"Time/Token (Decode):  {time_per_token:.4f} ms/token\n")
-            f.write(f"Total Wallclock:      {total_wallclock_ms:.4f} ms\n")
+            f.write(f"TTFT (Latency):       {ttft_ms:.4f}\n")
+            f.write(f"Time/Token (Decode):  {time_per_token:.4f}\n")
+            f.write(f"Total Wallclock:      {total_wallclock_ms:.4f}\n")
             f.write(f"Output:               \"{generated_text}\"\n\n")
 
         print(f"  [Result] TTFT: {ttft_ms:.2f}ms | Decode: {time_per_token:.2f}ms/t")
