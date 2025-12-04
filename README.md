@@ -13,5 +13,9 @@ This is a minimal, self-contained implementation of GPT-2 inference on RISC-V, d
 ## Run
 ```qemu-riscv64 ./gpt2_rvv```
 
+### OR (to run a custom prompt)
+```python3 ablate.py <num_output_tokens> "<prompt>"```
+
+
 ---
 <sub>Built in collaboration with [BorisVictoria](https://github.com/BorisVictoria) and [Joel Ethan Batac](https://github.com/marcusaurelys)</sub>
